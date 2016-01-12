@@ -1,0 +1,511 @@
+package changeminer.HandlerForRA;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Hashtable;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import com.itplus.cm.ce.addon.common.custom.HandlerForRA;
+import com.itplus.cm.ce.internal.meta.CM_OBJ;
+import com.itplus.cm.ce.internal.meta.CM_SRC;
+import com.itplus.cm.ce.util.Environment;
+import com.itplus.cm.ce.util.FileUtil;
+import com.itplus.cm.parser.common.CMParserCommonData;
+
+import changeminer.HandlerForRA.NS_JCL_SHELL2.MainShellUtil;
+import extractor.common.tobj.TDpd;
+import extractor.common.tobj.TLocation;
+import extractor.common.tobj.TMeta;
+import extractor.common.tobj.TObj;
+import extractor.common.tobj.TResult;
+
+public class NS_TWS_HANDLER  extends HandlerForRA{
+
+		public boolean debugMode = true;
+		public int JOB_STEAM_FILE = 651101;
+		public int JOB_FILE = 651102;
+		public int CALL_SHELL = 6511006;
+		public String TIMING_META = "8212308";
+		public HashMap<String, TDpd> callDpds =  new HashMap<String, TDpd>();
+
+
+	    public NS_TWS_HANDLER() {
+
+	    }
+
+	    public int doAnalyzeStep(CMParserCommonData data, CM_SRC cm_src, TResult tresult) throws Exception {
+	        return RETURN_CONTINUE;
+	    }
+
+	   public int addAnalyzeStep(CMParserCommonData data, CM_SRC cm_src, TResult tresult) throws Exception {
+		    String file_name = Environment.getSourceDir() + "/" + cm_src.getCOLLECT_ID() + cm_src.getSPATH() + cm_src.getSNAME();
+	        TObj obj_root = tresult.getTObjList()[0];
+
+	        if(obj_root.getType() == JOB_FILE){
+	        	addJobStep(obj_root, file_name);
+	        }else if(obj_root.getType() == JOB_STEAM_FILE){
+	        	addJobStreamStep(obj_root, file_name);
+	        }
+
+	        return RETURN_CONTINUE;
+	    }
+
+	   public void addJobStep(TObj root_obj, String fileName){
+
+		   FileInputStream fis = null;
+	       BufferedReader br = null;
+	       boolean isJobStart = false;
+	       JobInfo jobInfo = null;
+
+	       try {
+	    	   File file = new File(fileName);
+	    	   fis = new FileInputStream(file);
+	    	   br = new BufferedReader(new InputStreamReader(fis));
+	    	   int line_cnt =0;
+	    	   while (br.ready()) {
+	    		   String line_data = br.readLine();
+	    		   if (line_data == null) continue;
+	    		   line_cnt++;
+
+	    		   if(PatternUtil.isMatched(line_data, new String[]{"([^\\s]+)#([^\\s]+)"})){
+	    			   debugLog("***** Job Start *****");
+
+	    			   ArrayList<String> jobParams = PatternUtil.getValues(line_data, "([^\\s]+)#([^\\s]+)");
+
+	    			   if(jobParams.size() != 0 && jobParams.size() == 2){
+	    				   isJobStart = true;
+		    			   jobInfo = new JobInfo();
+
+		    			   for(int i = 0 ; i < jobParams.size() ; i ++){
+		    				   if(i == 0){
+		    					   jobInfo.workStation = jobParams.get(i);
+		    				   }else if(i == 1){
+		    					   jobInfo.jobName = jobParams.get(i);
+		    				   }
+		    			   }
+
+		    			   debugLog("	add JobInfo(workstation) : " + jobInfo.workStation);
+		    			   debugLog("	add JobInfo(jobName) : " + jobInfo.jobName);
+
+	    			   }else{
+	    				   debugLog("	* params is empty or length error(" + line_cnt + ")");
+	    			   }
+
+	    		   }
+
+	    		   if(isJobStart){
+	    			   if(jobInfo != null && jobInfo.isJobInfoCreated() && !line_data.isEmpty()){
+	    				   debugLog("		data : " + line_data);
+	    				   jobInfo.checkKeywords(line_data, line_cnt);
+	    			   }
+
+	    		   }
+
+	    		   if(line_data.isEmpty()){
+	    			   if(isJobStart){
+	    				   isJobStart = false;
+	    				   if(jobInfo != null){
+	    					   //jobInfo.log();
+	    					   addScripts(root_obj, jobInfo);
+	    				   }
+	    			   }
+
+
+	    			   jobInfo = null;
+	    		   }
+	    	   }
+
+	    	   for(int i = 0 ; i < root_obj.getTObjList().length ; i++){
+	        		TObj sub = root_obj.getTObjList()[i];
+	        		if(sub.getType() == 651104){
+	        			String gid = sub.getGID();
+	        			if(callDpds.containsKey(gid)){
+	        				root_obj.getTObjList()[i].add(callDpds.get(gid));
+	        			}
+	        		}
+	        	}
+
+
+	       }catch(Exception e){
+	    	   e.printStackTrace();
+	       }  finally {
+	            try {
+	                br.close();
+	                fis.close();
+	            }  catch (IOException ex) {
+	                ex.printStackTrace();
+	            }
+	       }
+	   }
+
+	   public void addJobStreamStep(TObj root_obj, String fileName){
+
+		   FileInputStream fis = null;
+	       BufferedReader br = null;
+	       boolean isSchedStart = false;
+	       ArrayList<String> schedInfos = null;
+	       try {
+	    	   File file = new File(fileName);
+	    	   fis = new FileInputStream(file);
+	    	   br = new BufferedReader(new InputStreamReader(fis));
+	    	   int line_cnt =0;
+	    	   while (br.ready()) {
+	    		   String line_data = br.readLine();
+	    		   if (line_data == null) continue;
+	    		   line_cnt++;
+
+	    		   if(PatternUtil.isMatched(line_data, new String[]{"SCHEDULE[\\s]+[^\\s]+#[^\\s]+"})){
+	    			   debugLog("***** Job Stream Start *****" + " " + line_cnt);
+	    			   isSchedStart = true;
+	    			   schedInfos = new ArrayList<String>();
+	    		   }
+
+	    		   if(isSchedStart){
+	    			   
+	    			   if(line_data.trim().equals(":")){
+	    				   debugLog("	SCHDULE INFO END >> " + line_cnt);
+	    				   
+	    				   for(int i = 0 ; i < schedInfos.size() ; i++){
+	    					   debugLog("			INFO  >> " + schedInfos.get(i));
+	    				   }
+	    				   
+	    				   schedInfos = null;
+	    			   }
+	    			   
+	    			   if(schedInfos != null){
+	    				   schedInfos.add(line_data);
+	    			   }
+	    			   
+	    			   if(PatternUtil.isMatched(line_data, new String[]{"^([^\\s]+#[^\\s]+)"})){
+	    				   debugLog("		find job >> " + line_data);
+	    			   }
+	    		   }
+
+	    		   if(line_data.trim().startsWith("END")){
+	    			   if(isSchedStart){
+	    				   isSchedStart = false;
+	    			   }
+
+	    		   }
+
+	    	   }
+
+	       }catch(Exception e){
+	    	   e.printStackTrace();
+	       }  finally {
+	            try {
+	                br.close();
+	                fis.close();
+	            }  catch (IOException ex) {
+	                ex.printStackTrace();
+	            }
+	       }
+	   }
+
+	   public void addScripts(TObj root_obj, JobInfo jobInfo){
+		   debugLog("	-- addScripts Start --");
+		   
+		   if(jobInfo.getValue(JobKeyWord.SCRIPTNAME).isEmpty()){
+			   return;
+		   }
+
+		   ArrayList<String> scriptParam = PatternUtil.getValues(jobInfo.getValue(JobKeyWord.SCRIPTNAME), "([^\\s]+)");
+		   int line = jobInfo.getLineValue(JobKeyWord.SCRIPTNAME);
+		   if(scriptParam.size() == 4){
+			   debugLog("find 4th");
+		   }
+		   if(scriptParam.size() == 5){
+			   debugLog("find 5th");
+		   }
+		   for(int i = 0 ; i < scriptParam.size() ; i ++){
+			   debugLog("		data : " + scriptParam.get(i));
+			   String paramStr = scriptParam.get(i);
+			   if(i == 0){
+				   //SWITCH SHELL
+			   }else if (i == 1){
+				   //MainShell
+				   paramStr = paramStr+".sh";
+				  TDpd callShellDpd = new TDpd(CALL_SHELL, paramStr, paramStr, 100,  new TLocation(line) );
+				  if(scriptParam.size() == 4){
+					  TMeta timingMeta = new TMeta(1000, TIMING_META, scriptParam.get(i), new TLocation(line));
+					  callShellDpd.add(timingMeta);
+				  }
+				  addMap(jobInfo.getFullGid(), callShellDpd);
+			   }
+		   }
+
+
+	   }
+
+	   public void addMap(String gid, TDpd dpd){
+		   if(!callDpds.containsKey(gid)){
+			   callDpds.put(gid, dpd);
+		   }
+	   }
+
+	   public int doTObj(int depth, CM_SRC cm_src, TObj tobj, long parent_object_id) {
+	        return RETURN_CONTINUE;
+	    }
+
+	   public int doTDpd(int depth, TDpd tdpd, CM_SRC cm_src, CM_OBJ cm_obj, int seq) throws SQLException {
+	        return RETURN_CONTINUE;
+	    }
+
+	   public long generateGID(String prefix, TObj tobj) {
+	        return 0L;
+	    }
+
+	   public long generateGID(String prefix, TDpd tdpd) {
+		   if(tdpd.getType() == CALL_SHELL){
+			   return FileUtil.getGID("<FILE>", tdpd.getGID());
+		   }
+	        return 0L;
+	    }
+
+	   public void debugLog(String str){
+		   if(debugMode){
+			   System.out.println(str);
+		   }
+	   }
+
+	   public static class PatternUtil{
+
+	    	public static String check(String str, String pattern, int returnIndex){
+	    		String returnValue = "";
+	    		Pattern p = Pattern.compile(pattern);
+	    		Matcher m = p.matcher(str);
+	    		while(m.find()){
+	    			for(int i = 0 ; i < m.groupCount() ; i++){
+	    				int cnt = i+1;
+	    				String param = m.group(cnt);
+	    				if(returnIndex == cnt){
+	    					returnValue = param;
+	    				}
+	    			}
+	    		}
+	    		return returnValue;
+	    	}
+
+	    	public static ArrayList<String> getValues(String str, String pattern){
+	    		ArrayList<String> results = new ArrayList<String>();
+	    		Pattern p = Pattern.compile(pattern);
+	    		Matcher m = p.matcher(str);
+	    		while(m.find()){
+	    			for(int i = 0 ; i < m.groupCount() ; i++){
+	    				String param = m.group(i+1);
+	    				results.add(param);
+	    			}
+	    		}
+	    		return results;
+	    	}
+
+	    	public static ArrayList<String> getValues(String str, String pattern, String[] filters){
+	    		ArrayList<String> results = new ArrayList<String>();
+	    		Pattern p = Pattern.compile(pattern);
+	    		Matcher m = p.matcher(str);
+	    		while(m.find()){
+	    			for(int i = 0 ; i < m.groupCount() ; i++){
+	    				String param = m.group(i+1);
+	    				if(isMatched(param, filters)){
+	    					continue;
+	    				}
+	    				results.add(param);
+	    			}
+	    		}
+	    		return results;
+	    	}
+
+	    	public static boolean isMatched(String str, String[] patterns){
+	    		boolean isMatched = false;
+	    		for(int i = 0; i < patterns.length; i++){
+	    			Pattern p = Pattern.compile(patterns[i]);
+	    			Matcher m = p.matcher(str);
+	    			if(m.find()){
+	    				isMatched = true;
+	    				break;
+	    			}
+	    		}
+	    		return isMatched;
+	    	}
+	    }
+
+	   public enum JobKeyWord{
+		   SCRIPTNAME,
+		   STREAMLOGON,
+		   DESCRIPTION,
+		   TASKTYPE,
+		   RECOVERY,
+		   DOCOMMAND,
+		   RCCONDSUCC,
+		   UNKNOWN;
+
+		   public static JobKeyWord valueOfString(String keyword){
+
+			   JobKeyWord result = JobKeyWord.UNKNOWN;
+
+			   if(keyword.equals("SCRIPTNAME")){
+				   result = JobKeyWord.SCRIPTNAME;
+			   }else if(keyword.equals("STREAMLOGON")){
+				   result = JobKeyWord.STREAMLOGON;
+			   }else if(keyword.equals("DESCRIPTION")){
+				   result = JobKeyWord.DESCRIPTION;
+			   }else if(keyword.equals("TASKTYPE")){
+				   result = JobKeyWord.TASKTYPE;
+			   }else if(keyword.equals("RECOVERY")){
+				   result = JobKeyWord.RECOVERY;
+			   }else if(keyword.equals("DOCOMMAND")){
+				   result = JobKeyWord.DOCOMMAND;
+			   }else if(keyword.equals("RCCONDSUCC")){
+				   result = JobKeyWord.RCCONDSUCC;
+			   }else{
+				   System.out.println("unknown keyword >> " + keyword);
+				   result = JobKeyWord.UNKNOWN;
+			   }
+
+			   return result;
+		   }
+
+		   public static String valueOfJobKey(JobKeyWord jobKey){
+
+			   String result = "UNKNOWN";
+
+			   switch (jobKey){
+			   case	 SCRIPTNAME :
+				   result = "SCRIPTNAME";
+				   break;
+			   case	 STREAMLOGON :
+				   result = "STREAMLOGON";
+				   break;
+			   case	 DESCRIPTION :
+				   result = "DESCRIPTION";
+				   break;
+			   case	 TASKTYPE :
+				   result = "TASKTYPE";
+				   break;
+			   case	 RECOVERY :
+				   result = "RECOVERY";
+				   break;
+			   case	 DOCOMMAND :
+				   result = "DOCOMMAND";
+				   break;
+			   case	 RCCONDSUCC :
+				   result = "RCCONDSUCC";
+				   break;
+			   case	 UNKNOWN :
+				   result = "UNKNOWN";
+				   break;
+			   default :
+				   result = "UNKNOWN";
+				   break;
+
+			   }
+
+			   return result;
+		   }
+	   }
+
+	   public class JobInfo{
+
+
+		   String workStation;
+		   String jobName;
+		   HashMap<JobKeyWord, String> keywords = new HashMap<JobKeyWord, String>();
+		   HashMap<JobKeyWord, Integer> keywordLine = new HashMap<JobKeyWord, Integer>();
+
+		   public JobInfo(){}
+
+		   public String getFullGid(){
+			   return workStation+"#"+jobName;
+		   }
+
+		   public boolean isJobInfoCreated(){
+			   return (workStation != null && !workStation.isEmpty()) && (jobName != null && !jobName.isEmpty());
+		   }
+
+		   public void checkKeywords(String lineStr, int line_count){
+
+			   if(PatternUtil.isMatched(lineStr, new String[]{"([^\\s]+)[\\s]+(.+)"})){
+				   String keyword = PatternUtil.check(lineStr, "([^\\s]+)[\\s]+(.+)", 1);
+				   String param = PatternUtil.check(lineStr, "([^\\s]+)[\\s]+(.+)", 2);
+
+				   //debugLog("			matched(keyword) : " + keyword);
+				   //debugLog("			matched(param) : " + param);
+
+				   addKeywords(keyword, param, line_count);
+			   }
+
+		   }
+
+		   public void addKeywords(String keyword, String params, int line_count){
+			   if(!keywords.containsKey(JobKeyWord.valueOfString(keyword))){
+
+				   if(params.startsWith("\"") && params.endsWith("\"")){
+					   params = params.substring(1, params.lastIndexOf("\""));
+				   }
+				   if(params.contains("\\\"")){
+					   params = params.replace("\\\"", "");
+				   }
+
+				   keywords.put(JobKeyWord.valueOfString(keyword), params);
+				   keywordLine.put(JobKeyWord.valueOfString(keyword), line_count);
+				   //debugLog("				add " + keyword + " " + params);
+			   }
+		   }
+
+		   public String getValue(JobKeyWord keyword){
+			   String value = "";
+			   if(keywords.containsKey(keyword)){
+				   value = keywords.get(keyword);
+			   }
+
+			   return value;
+		   }
+
+		   public int getLineValue(JobKeyWord keyword){
+			   int value = 0;
+			   if(keywordLine.containsKey(keyword)){
+				   value = keywordLine.get(keyword);
+			   }
+
+			   return value;
+		   }
+
+		   public void log() {
+
+			   debugLog(String.format("			----- WorkStation %s, JobName %s", workStation, jobName));
+			   for(Map.Entry<JobKeyWord, String> entry : keywords.entrySet()){
+				   JobKeyWord key= entry.getKey();
+	                String param = entry.getValue();
+	                debugLog(String.format("						 - keyWord:param >>  %s : %s", JobKeyWord.valueOfJobKey(key), param));
+	            }
+		   }
+
+
+	   }
+
+	   public static void main(String[] args) {
+	    	TObj obj_root = new TObj(1, "", "", 100, new TLocation() );
+	    	String fileName = "C:\\Users\\ito-motoi\\Desktop\\PJ\\NISSAN\\Source\\GPC5003_jobs_20151103.txt";
+	    	//String fileName = "C:\\Users\\ito-motoi\\Desktop\\PJ\\NISSAN\\Source\\GPC5003_sched_20151103.txt";
+	    	NS_TWS_HANDLER nth = new NS_TWS_HANDLER();
+	        try {
+
+	        	nth.addJobStep(obj_root, fileName);
+	        	//nth.addJobStreamStep(obj_root, fileName);
+
+	        } catch (Exception e) {
+	            // TODO Auto-generated catch block
+	            e.printStackTrace();
+	        }
+	    }
+
+
+}
